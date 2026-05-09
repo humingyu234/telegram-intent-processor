@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telegram Intent Processor — Dashboard</title>
+<style>
+:root {
+  --bg: #0f1117; --panel: #1a1d27; --border: #2a2d3a;
+  --text: #c9d1d9; --muted: #6e7681; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29922;
+  --purple: #bc8cff; --orange: #f0883e;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--text); padding: 16px; }
+h1 { font-size: 20px; margin-bottom: 4px; }
+h2 { font-size: 14px; color: var(--muted); margin-bottom: 12px; font-weight: normal; }
+.subtitle { font-size: 12px; color: var(--muted); margin-bottom: 20px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.panel { background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px; }
+.panel h3 { font-size: 13px; margin-bottom: 10px; color: var(--accent); }
+.full { grid-column: 1 / -1; }
+.health-row { display: flex; gap: 16px; flex-wrap: wrap; }
+.health-item { text-align: center; min-width: 80px; }
+.health-value { font-size: 24px; font-weight: 700; }
+.health-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.green { color: var(--green); } .red { color: var(--red); }
+.yellow { color: var(--yellow); } .purple { color: var(--purple); }
+.msg-row { font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border);
+  display: flex; gap: 8px; align-items: center; }
+.msg-row:last-child { border-bottom: none; }
+.tag { font-size: 10px; padding: 1px 6px; border-radius: 10px;
+  background: rgba(88,166,255,0.15); color: var(--accent); }
+.tag.urgent { background: rgba(248,81,73,0.15); color: var(--red); }
+.tag.needs_human { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.btn { padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--text); cursor: pointer; font-size: 12px; }
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.danger { border-color: rgba(248,81,73,0.3); color: var(--red); }
+.btn.danger:hover { background: rgba(248,81,73,0.1); }
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.stream { max-height: 280px; overflow-y: auto; font-size: 12px; }
+.summary { max-height: 180px; overflow-y: auto; font-size: 12px; }
+.group-card { border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px; margin-bottom: 6px; font-size: 12px; }
+.group-card .gid { color: var(--accent); font-weight: 600; }
+.group-card .attn { color: var(--red); font-weight: 600; }
+#summary-panel pre { font-size: 11px; color: var(--muted); white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<h1>Telegram Intent Processor</h1>
+<p class="subtitle">实时群消息意图识别 · 状态机 · Redis 降级</p>
+
+<div class="grid">
+
+  <!-- Health -->
+  <div class="panel full" id="health-panel">
+    <h3>System Health</h3>
+    <div class="health-row" id="health-metrics">
+      <div class="health-item"><div class="health-value green" id="h-redis">—</div><div class="health-label">Redis</div></div>
+      <div class="health-item"><div class="health-value" id="h-processed">0</div><div class="health-label">Processed</div></div>
+      <div class="health-item"><div class="health-value yellow" id="h-invalid">0</div><div class="health-label">Invalid</div></div>
+      <div class="health-item"><div class="health-value" id="h-duplicates">0</div><div class="health-label">Duplicates</div></div>
+      <div class="health-item"><div class="health-value red" id="h-fallback">0</div><div class="health-label">Fallback Writes</div></div>
+      <div class="health-item"><div class="health-value purple" id="h-inflight">0</div><div class="health-label">In-flight Messages</div></div>
+      <div class="health-item"><div class="health-value" id="h-max">50</div><div class="health-label">Max In-flight</div></div>
+    </div>
+  </div>
+
+  <!-- Message stream -->
+  <div class="panel">
+    <h3>Real-time Message Stream</h3>
+    <div class="stream" id="stream"><div style="color:var(--muted)">Waiting for messages...</div></div>
+  </div>
+
+  <!-- Classification -->
+  <div class="panel">
+    <h3>Classification Results</h3>
+    <div class="stream" id="class-stream"><div style="color:var(--muted)">Waiting for messages...</div></div>
+  </div>
+
+  <!-- Group states -->
+  <div class="panel full">
+    <h3>Group State Panel</h3>
+    <div id="group-panel" style="max-height:220px;overflow-y:auto;"><div style="color:var(--muted)">No groups yet.</div></div>
+  </div>
+
+  <!-- Demo controls -->
+  <div class="panel full">
+    <h3>Demo Controls</h3>
+    <div class="btn-row">
+      <button class="btn" onclick="demo('sample')">Send Sample Message</button>
+      <button class="btn" onclick="demo('burst')">Run Visual Burst (100msgs × 10 groups)</button>
+      <button class="btn" onclick="demo('load')">Run Load Demo (1200msgs × 50 groups)</button>
+      <button class="btn danger" onclick="demo('redis-down')">Simulate Redis Down</button>
+      <button class="btn" onclick="demo('redis-recover')">Recover Redis</button>
+      <button class="btn danger" onclick="demo('malformed')">Send Malformed Message</button>
+    </div>
+  </div>
+
+  <!-- Summary -->
+  <div class="panel full" id="summary-panel">
+    <h3>Batch Summary</h3>
+    <pre style="color:var(--muted)">Run a batch demo to see summary results here.</pre>
+  </div>
+
+</div>
+
+<script>
+const streamEl = document.getElementById('stream');
+const classEl = document.getElementById('class-stream');
+const groupEl = document.getElementById('group-panel');
+const summaryEl = document.getElementById('summary-panel').querySelector('pre');
+const maxStream = 50;
+
+const groups = {}; // group_id -> latest snapshot
+
+function demo(action) {
+  fetch('/demo/' + action, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (action === 'burst' || action === 'load') {
+        summaryEl.textContent = JSON.stringify(data, null, 2);
+      }
+    })
+    .catch(err => console.error(err));
+}
+
+// SSE
+const evtSource = new EventSource('/events');
+evtSource.onmessage = function(e) {
+  const event = JSON.parse(e.data);
+  if (event.type !== 'message_processed') return;
+
+  const r = event.result;
+  const snap = event.group_snapshot;
+  const h = event.health;
+
+  // Health
+  document.getElementById('h-redis').textContent = h.redis;
+  document.getElementById('h-redis').className = 'health-value ' + (h.redis === 'healthy' ? 'green' : 'red');
+  document.getElementById('h-processed').textContent = h.processed_messages;
+  document.getElementById('h-invalid').textContent = h.invalid_messages;
+  document.getElementById('h-duplicates').textContent = h.duplicate_messages;
+  document.getElementById('h-fallback').textContent = h.fallback_writes;
+  document.getElementById('h-inflight').textContent = event.in_flight;
+
+  // Message stream
+  const statusCls = { processed: 'green', duplicate: 'yellow', invalid: 'red', fallback: 'red', failed: 'red' };
+  const tagSpans = r.tags.map(t => {
+    let cls = 'tag';
+    if (t === 'urgent' || t === 'billing_dispute') cls += ' urgent';
+    if (t === 'needs_human' || t === 'complaint_context') cls += ' needs_human';
+    return '<span class="' + cls + '">' + t + '</span>';
+  }).join(' ');
+
+  const row = '<div class="msg-row">' +
+    '<span style="color:var(--' + (statusCls[r.status] || 'muted') + ')">' + r.status + '</span>' +
+    '<span>' + r.message_id + '</span>' +
+    '<span style="color:var(--accent)">' + r.group_id + '</span>' +
+    '<span>' + r.user_id + '</span>' +
+    '<span title="' + r.text.replace(/"/g, '&quot;') + '" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + r.text + '</span>' +
+    '</div>';
+  streamEl.insertAdjacentHTML('afterbegin', row);
+  while (streamEl.children.length > maxStream) streamEl.lastChild.remove();
+
+  // Classification
+  const cRow = '<div class="msg-row">' +
+    '<span style="color:var(--purple)">' + r.intent + '</span>' +
+    tagSpans +
+    '<span style="color:var(--muted);font-size:10px;">' + (r.reason || '') + '</span>' +
+    '</div>';
+  classEl.insertAdjacentHTML('afterbegin', cRow);
+  while (classEl.children.length > maxStream) classEl.lastChild.remove();
+
+  // Group state
+  groups[snap.group_id] = snap;
+  let gHtml = '';
+  for (const [gid, g] of Object.entries(groups)) {
+    const attn = g.needs_human_attention ? ' <span class="attn">NEEDS HUMAN</span>' : '';
+    gHtml += '<div class="group-card">' +
+      '<span class="gid">' + gid + '</span> ' +
+      '<span>' + g.current_state + '</span>' +
+      attn +
+      ' | msgs: ' + g.message_count +
+      ' | counts: ' + JSON.stringify(g.intent_counts) +
+      ' | last: ' + (g.last_intent || '—') +
+      ' | tags: ' + (g.recent_tags || []).join(', ') +
+      '</div>';
+  }
+  groupEl.innerHTML = gHtml || '<div style="color:var(--muted)">No groups yet.</div>';
+};
+
+evtSource.onerror = function() { console.log('SSE disconnected, reconnecting...'); };
+</script>
+</body>
+</html>

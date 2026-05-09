@@ -1,0 +1,221 @@
+"""Message processing pipeline — the core orchestration layer."""
+
+import asyncio
+import time
+from collections import defaultdict
+
+from app.classifier import classify_message
+from app.models import (
+    GroupSnapshot,
+    GroupState,
+    IncomingMessage,
+    Intent,
+    ProcessingResult,
+    ProcessingStatus,
+)
+from app.state import GroupStateMachine
+from app.store import MessageStore
+
+
+class MessageProcessor:
+    """Orchestrates the full processing pipeline for each incoming message.
+
+    Concurrency model:
+    - ``semaphore`` caps the number of in-flight messages globally.
+    - Per-group ``asyncio.Lock`` ensures state updates inside a single group
+      are serialised, while different groups can run concurrently.
+    - SSE events are pushed to all connected dashboard subscribers via
+      ``event_queues``.
+    """
+
+    def __init__(
+        self,
+        store: MessageStore,
+        max_in_flight: int = 50,
+    ) -> None:
+        self.store = store
+        self._max_in_flight = max_in_flight
+        self.semaphore = asyncio.Semaphore(max_in_flight)
+        self._group_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+        # In-memory group state machines (loaded from store on first access)
+        self._state_machines: dict[str, GroupStateMachine] = {}
+
+        # SSE subscriber queues
+        self._subscribers: list[asyncio.Queue] = []
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def process(self, message: IncomingMessage) -> ProcessingResult:
+        """Run the full pipeline for one message.
+
+        Pipeline: validate → dedup → classify → lock → update state →
+        store → unlock → push SSE → return result.
+        """
+        async with self.semaphore:
+            return await self._process_impl(message)
+
+    async def process_batch(
+        self, messages: list[IncomingMessage]
+    ) -> list[ProcessingResult]:
+        """Process multiple messages concurrently."""
+        tasks = [self.process(m) for m in messages]
+        return await asyncio.gather(*tasks)
+
+    # ------------------------------------------------------------------
+    # SSE subscriber management
+    # ------------------------------------------------------------------
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=256)
+        self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        try:
+            self._subscribers.remove(q)
+        except ValueError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Group state helpers
+    # ------------------------------------------------------------------
+
+    async def get_group_snapshot(self, group_id: str) -> GroupSnapshot:
+        sm = self._state_machines.get(group_id)
+        if sm:
+            return sm.snapshot()
+        return GroupSnapshot(group_id=group_id)
+
+    async def get_or_create_state_machine(
+        self, group_id: str
+    ) -> GroupStateMachine:
+        """Load persisted state or create a fresh state machine."""
+        if group_id in self._state_machines:
+            return self._state_machines[group_id]
+
+        saved = await self.store.get_group_state(group_id)
+        if saved:
+            sm = GroupStateMachine(
+                group_id=group_id,
+                current_state=saved.current_state,
+                message_count=saved.message_count,
+                intent_counts=saved.intent_counts,
+                last_intent=saved.last_intent,
+                latest_tags=saved.recent_tags,
+                needs_human_attention=saved.needs_human_attention,
+            )
+        else:
+            sm = GroupStateMachine(group_id=group_id)
+
+        self._state_machines[group_id] = sm
+        return sm
+
+    # ------------------------------------------------------------------
+    # Dashboard snapshot helpers
+    # ------------------------------------------------------------------
+
+    def in_flight_count(self) -> int:
+        # semaphore._value is the number of available slots
+        return self._max_in_flight - self.semaphore._value  # type: ignore[attr-defined]
+
+    @property
+    def max_in_flight(self) -> int:
+        return self._max_in_flight
+
+    def all_group_snapshots(self) -> list[dict]:
+        return [sm.snapshot().model_dump() for sm in self._state_machines.values()]
+
+    # ------------------------------------------------------------------
+    # Internal pipeline
+    # ------------------------------------------------------------------
+
+    async def _process_impl(
+        self, message: IncomingMessage
+    ) -> ProcessingResult:
+        # — dedup —
+        is_dup = await self.store.check_duplicate(message.message_id)
+        if is_dup:
+            self.store.duplicate_count += 1
+            return ProcessingResult(
+                message_id=message.message_id,
+                group_id=message.group_id,
+                user_id=message.user_id,
+                text=message.text,
+                intent=Intent.OTHER,
+                tags=[],
+                status=ProcessingStatus.DUPLICATE,
+                reason="duplicate message_id",
+            )
+
+        # — classify with group context —
+        sm = await self.get_or_create_state_machine(message.group_id)
+        group_ctx = sm.snapshot()
+        intent, tags = classify_message(message.text, group_context=group_ctx)
+
+        # — update state (per-group lock) —
+        lock = self._group_locks[message.group_id]
+        async with lock:
+            sm.apply(intent, tags)
+            snapshot = sm.snapshot()
+            used_fallback = not await self.store.save_group_state(
+                message.group_id, snapshot
+            )
+
+        # — persist result —
+        result = ProcessingResult(
+            message_id=message.message_id,
+            group_id=message.group_id,
+            user_id=message.user_id,
+            text=message.text,
+            intent=intent,
+            tags=tags,
+            status=ProcessingStatus.FALLBACK
+            if used_fallback
+            else ProcessingStatus.PROCESSED,
+            reason="Redis unavailable, used fallback store"
+            if used_fallback
+            else "",
+            group_state_after=snapshot.current_state,
+            fallback_used=used_fallback,
+        )
+
+        used_fallback_for_result = not await self.store.save_result(result)
+        if used_fallback_for_result:
+            self.store.fallback_count += 1
+            result = result.model_copy(
+                update={
+                    "status": ProcessingStatus.FALLBACK,
+                    "reason": "Redis unavailable, used fallback store",
+                    "fallback_used": True,
+                }
+            )
+
+        if not used_fallback and not used_fallback_for_result:
+            self.store.processed_count += 1
+
+        # — push SSE —
+        await self._broadcast(result, snapshot)
+
+        return result
+
+    async def _broadcast(
+        self, result: ProcessingResult, snapshot: GroupSnapshot
+    ) -> None:
+        event = {
+            "type": "message_processed",
+            "result": result.model_dump(),
+            "group_snapshot": snapshot.model_dump(),
+            "health": self.store.health(),
+            "in_flight": self.in_flight_count(),
+        }
+        dead: list[asyncio.Queue] = []
+        for q in self._subscribers:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            self.unsubscribe(q)
