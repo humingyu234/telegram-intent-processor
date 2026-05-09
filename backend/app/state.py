@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from app.models import GroupState, Intent
+from app.models import GroupSnapshot, GroupState, Intent
 
 
 # Intent -> resulting state mapping.
@@ -25,7 +25,7 @@ class GroupStateMachine:
     message_count: int = 0
     intent_counts: dict[str, int] = field(default_factory=dict)
     last_intent: Intent | None = None
-    recent_tags: list[str] = field(default_factory=list)
+    latest_tags: list[str] = field(default_factory=list)
     needs_human_attention: bool = False
 
     def apply(
@@ -47,7 +47,7 @@ class GroupStateMachine:
         self.intent_counts[key] = self.intent_counts.get(key, 0) + 1
 
         self.last_intent = intent
-        self.recent_tags = tags
+        self.latest_tags = tags
 
         # State transition
         if intent == Intent.OTHER:
@@ -60,13 +60,13 @@ class GroupStateMachine:
         if intent == Intent.COMPLAINT:
             self.needs_human_attention = True
 
-    def snapshot(self) -> dict:
-        return {
-            "group_id": self.group_id,
-            "current_state": self.current_state.value,
-            "message_count": self.message_count,
-            "intent_counts": self.intent_counts,
-            "last_intent": self.last_intent.value if self.last_intent else None,
-            "recent_tags": self.recent_tags[-5:],
-            "needs_human_attention": self.needs_human_attention,
-        }
+    def snapshot(self) -> GroupSnapshot:
+        return GroupSnapshot(
+            group_id=self.group_id,
+            current_state=self.current_state,
+            message_count=self.message_count,
+            intent_counts=self.intent_counts,
+            last_intent=self.last_intent,
+            recent_tags=self.latest_tags[:],
+            needs_human_attention=self.needs_human_attention,
+        )

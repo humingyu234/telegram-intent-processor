@@ -1,7 +1,6 @@
 """Pydantic models for the Telegram Intent Processor."""
 
 from enum import Enum
-from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, field_validator
 

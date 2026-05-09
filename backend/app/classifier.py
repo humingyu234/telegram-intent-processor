@@ -2,7 +2,7 @@
 
 import re
 
-from app.models import GroupState, Intent
+from app.models import GroupSnapshot, GroupState, Intent
 
 # ---------------------------------------------------------------------------
 # Keyword tables — ordered by specificity (more specific patterns checked first)
@@ -100,12 +100,12 @@ def generate_tags(intent: Intent, text: str = "") -> list[str]:
 
 def classify_message(
     text: str,
-    group_context: dict | None = None,
+    group_context: dict | GroupSnapshot | None = None,
 ) -> tuple[Intent, list[str]]:
     """Classify a message and generate tags, with optional group-context awareness.
 
-    group_context is expected to be a dict with 'current_state' (e.g. from
-    GroupStateMachine.snapshot()), or None when no prior state exists.
+    group_context is either a GroupSnapshot (from GroupStateMachine.snapshot()),
+    a plain dict with 'current_state', or None when no prior state exists.
 
     Context-aware rule (lightweight, no LLM):
     - If the group is COMPLAINT_ESCALATED and the text matches pricing
@@ -121,8 +121,13 @@ def classify_message(
     if group_context is None:
         return intent, tags
 
-    state = group_context.get("current_state")
-    if state == GroupState.COMPLAINT_ESCALATED.value:
+    if isinstance(group_context, GroupSnapshot):
+        current_state = group_context.current_state
+    else:
+        raw = group_context.get("current_state")
+        current_state = GroupState(raw) if raw else None
+
+    if current_state == GroupState.COMPLAINT_ESCALATED:
         tags.append("complaint_context")
         if intent == Intent.PRICING:
             tags.append("billing_dispute")

@@ -96,9 +96,9 @@ class TestGroupStateMachineTransitions:
         sm.apply(Intent.HELP, ["urgent", "needs_reply"])
 
         snap = sm.snapshot()
-        assert snap["group_id"] == "g1"
-        assert snap["current_state"] == "SUPPORT_NEEDED"
-        assert snap["message_count"] == 1
-        assert snap["intent_counts"] == {"help": 1}
-        assert snap["recent_tags"] == ["urgent", "needs_reply"]
-        assert snap["needs_human_attention"] is False
+        assert snap.group_id == "g1"
+        assert snap.current_state == GroupState.SUPPORT_NEEDED
+        assert snap.message_count == 1
+        assert snap.intent_counts == {"help": 1}
+        assert snap.recent_tags == ["urgent", "needs_reply"]
+        assert snap.needs_human_attention is False
