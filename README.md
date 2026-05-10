@@ -7,27 +7,21 @@
 ## 架构
 
 ```mermaid
-flowchart LR
-    A[POST /messages] --> B[Pydantic Validate]
-    B --> C[Atomic Dedup SET NX]
-    C --> D[Intent Classifier]
-    D --> E[Per-Group Lock]
-    E --> F[State Machine]
-    F --> G[(Redis Primary)]
-    F -.->|degraded| H[(Memory Fallback)]
-    F --> I[SSE Broadcast]
-    I --> J[Dashboard HTML]
+flowchart TD
+    API[/"POST /messages<br/>/messages/batch"/]
+    API --> Validate["Pydantic Validate"]
+    Validate --> Dedup["Atomic Dedup<br/>SET NX"]
+    Dedup --> Classify["Intent Classifier<br/>complaint > help > pricing > product > other"]
+    Classify --> Lock["Per-Group asyncio.Lock"]
+    Lock --> State["State Machine<br/>IDLE → PRODUCT → PRICING → SUPPORT → COMPLAINT"]
+    State --> Persist["Persist Result"]
+    Persist --> Redis{"Redis?"}
+    Redis -->|healthy| Red[(Redis Store)]
+    Redis -.->|degraded| Mem[(Memory Fallback)]
+    State --> SSE["SSE Broadcast"]
+    SSE --> Dash["Dashboard<br/>HTML + SSE"]
 ```
 
-
-### 数据流
-
-```
-POST /messages  →  校验  →  去重  →  分类  →  群锁  →  状态机  →  Redis  →  SSE  →  Dashboard
-                                    ↓                              ↓
-                              complaint?                     fallback?
-                              最高优先级                     自动降级
-```
 
 ---
 
@@ -53,19 +47,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 打开 **http://localhost:8000/dashboard** 进入实时面板。
 
----
-
-## 演示截图
-
-> 录屏 GIF 放在 `docs/` 目录下，在 README 中引用。
-
-| 场景 | 说明 |
-|------|------|
-| Dashboard 全貌 | 各 Demo 按钮点击一轮的效果 |
-| Burst 实时流 | 100 条消息实时处理和展示 |
-| Redis 降级 | 断开 Redis 后系统继续运行 |
-
----
+------
 
 ## Dashboard 功能
 
