@@ -7,19 +7,11 @@
 ## 架构
 
 ```mermaid
-flowchart TD
-    API[/"POST /messages<br/>/messages/batch"/]
-    API --> Validate["Pydantic Validate"]
-    Validate --> Dedup["Atomic Dedup<br/>SET NX"]
-    Dedup --> Classify["Intent Classifier<br/>complaint > help > pricing > product > other"]
-    Classify --> Lock["Per-Group asyncio.Lock"]
-    Lock --> State["State Machine<br/>IDLE → PRODUCT → PRICING → SUPPORT → COMPLAINT"]
-    State --> Persist["Persist Result"]
-    Persist --> Redis{"Redis?"}
-    Redis -->|healthy| Red[(Redis Store)]
-    Redis -.->|degraded| Mem[(Memory Fallback)]
-    State --> SSE["SSE Broadcast"]
-    SSE --> Dash["Dashboard<br/>HTML + SSE"]
+flowchart LR
+    A[POST /messages] --> B[Validate] --> C[Dedup] --> D[Classify] --> E[Lock] --> F[State Machine] --> G[Persist]
+    G --> H[(Redis)]
+    G -.->|fallback| I[(Memory)]
+    F --> J[SSE] --> K[Dashboard]
 ```
 
 
