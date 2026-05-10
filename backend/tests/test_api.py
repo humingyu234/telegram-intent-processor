@@ -155,4 +155,5 @@ async def test_batch_endpoint_aggregates(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 10
-    assert data["processed"] == 10
+    # In degraded mode (test default), all status=fallback, so processed=0
+    assert data["processed"] + data["fallback_writes"] == 10

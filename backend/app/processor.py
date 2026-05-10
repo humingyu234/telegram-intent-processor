@@ -163,7 +163,11 @@ class MessageProcessor:
             text=message.text,
             intent=intent,
             tags=tags,
-            status=ProcessingStatus.PROCESSED,
+            status=(
+                ProcessingStatus.FALLBACK
+                if is_fallback
+                else ProcessingStatus.PROCESSED
+            ),
             reason=(
                 "Redis unavailable, using fallback storage"
                 if is_fallback
@@ -177,6 +181,7 @@ class MessageProcessor:
         if is_fallback:
             result = result.model_copy(
                 update={
+                    "status": ProcessingStatus.FALLBACK,
                     "reason": "Redis unavailable, using fallback storage",
                     "fallback_used": True,
                 }
