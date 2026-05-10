@@ -139,7 +139,6 @@ class MessageStore:
                 self._mark_degraded()
 
             self._group_states[group_id] = snapshot.model_dump()
-            self.fallback_count += 1
             return False
 
     async def get_group_state(
@@ -192,6 +191,7 @@ class MessageStore:
         self.fallback_count = 0
         self.invalid_count = 0
         self.duplicate_count = 0
+        self.degraded = False
 
     def force_degraded(self) -> None:
         self._redis = None
