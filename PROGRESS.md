@@ -70,6 +70,26 @@
 
 ---
 
+### 架构修正 + 真实 Redis 路径 + 服务化端点 (2026-05-11)
+
+**P0 — 真实 Redis：**
+- 添加 `docker-compose.yml`（redis:7-alpine + healthcheck）
+- store 重构为三模式：redis / local / degraded
+  - local mode（no Redis at startup）：消息不被标记为 fallback，返回 processed
+  - degraded mode（Redis was connected, then lost）：fallback 计入 fallback_count
+- 新增 `test_redis_store.py`（3 条 Redis smoke test，无 Redis 时自动 skip）
+
+**P1 — 服务形态：**
+- `POST /process` → `POST /messages`
+- `POST /process/batch` → `POST /messages/batch`
+- 新增 `GET /groups/{group_id}/state`
+- 新增 `GET /stats`（独立于 /health）
+- README 更新：docker compose 启动 + 新端点列表
+
+**测试：** 69 passed, 4 skipped（3 Redis + 1 SSE）
+
+---
+
 ### UX polish (2026-05-10)
 
 - 默认状态改为 "local"（没有 Redis 但健康），不再是 "degraded"
