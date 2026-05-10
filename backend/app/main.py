@@ -5,6 +5,7 @@ import json
 import os
 import random
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +16,8 @@ from pydantic import ValidationError
 from app.models import (
     BatchResult,
     IncomingMessage,
-    Intent,
     MessageRequest,
+    ProcessingResult,
     ProcessingStatus,
     SystemHealth,
 )
@@ -33,17 +34,39 @@ MAX_IN_FLIGHT = int(os.getenv("MAX_IN_FLIGHT", "50"))
 store = MessageStore(redis_url=REDIS_URL)
 processor = MessageProcessor(store, max_in_flight=MAX_IN_FLIGHT)
 
-app = FastAPI(title="Telegram Intent Processor")
 
-
-@app.on_event("startup")
-async def startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     await store.connect()
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
+    yield
     await store.disconnect()
+
+
+app = FastAPI(title="Telegram Intent Processor", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _aggregate(
+    results: list[ProcessingResult], elapsed_ms: int
+) -> BatchResult:
+    return BatchResult(
+        total=len(results),
+        processed=sum(
+            1 for r in results if r.status == ProcessingStatus.PROCESSED
+        ),
+        invalid=sum(
+            1 for r in results if r.status == ProcessingStatus.INVALID
+        ),
+        duplicates=sum(
+            1 for r in results if r.status == ProcessingStatus.DUPLICATE
+        ),
+        fallback_writes=sum(1 for r in results if r.fallback_used),
+        groups=len(set(r.group_id for r in results)),
+        duration_ms=elapsed_ms,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -75,22 +98,7 @@ async def process_batch(body: list[MessageRequest]) -> BatchResult:
     t0 = time.monotonic()
     results = await processor.process_batch(messages)
     elapsed_ms = int((time.monotonic() - t0) * 1000)
-
-    processed = sum(1 for r in results if r.status == ProcessingStatus.PROCESSED)
-    invalid = sum(1 for r in results if r.status == ProcessingStatus.INVALID)
-    duplicates = sum(1 for r in results if r.status == ProcessingStatus.DUPLICATE)
-    fallback = sum(1 for r in results if r.fallback_used)
-    groups = len(set(r.group_id for r in results))
-
-    return BatchResult(
-        total=len(results),
-        processed=processed,
-        invalid=invalid,
-        duplicates=duplicates,
-        fallback_writes=fallback,
-        groups=groups,
-        duration_ms=elapsed_ms,
-    )
+    return _aggregate(results, elapsed_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -213,22 +221,7 @@ async def demo_burst() -> BatchResult:
     t0 = time.monotonic()
     results = await processor.process_batch(messages)
     elapsed_ms = int((time.monotonic() - t0) * 1000)
-
-    processed = sum(1 for r in results if r.status == ProcessingStatus.PROCESSED)
-    invalid = sum(1 for r in results if r.status == ProcessingStatus.INVALID)
-    duplicates = sum(1 for r in results if r.status == ProcessingStatus.DUPLICATE)
-    fallback = sum(1 for r in results if r.fallback_used)
-    groups = len(set(r.group_id for r in results))
-
-    return BatchResult(
-        total=len(results),
-        processed=processed,
-        invalid=invalid,
-        duplicates=duplicates,
-        fallback_writes=fallback,
-        groups=groups,
-        duration_ms=elapsed_ms,
-    )
+    return _aggregate(results, elapsed_ms)
 
 
 @app.post("/demo/load")
@@ -249,22 +242,7 @@ async def demo_load() -> BatchResult:
     t0 = time.monotonic()
     results = await processor.process_batch(messages)
     elapsed_ms = int((time.monotonic() - t0) * 1000)
-
-    processed = sum(1 for r in results if r.status == ProcessingStatus.PROCESSED)
-    invalid = sum(1 for r in results if r.status == ProcessingStatus.INVALID)
-    duplicates = sum(1 for r in results if r.status == ProcessingStatus.DUPLICATE)
-    fallback = sum(1 for r in results if r.fallback_used)
-    groups = len(set(r.group_id for r in results))
-
-    return BatchResult(
-        total=len(results),
-        processed=processed,
-        invalid=invalid,
-        duplicates=duplicates,
-        fallback_writes=fallback,
-        groups=groups,
-        duration_ms=elapsed_ms,
-    )
+    return _aggregate(results, elapsed_ms)
 
 
 @app.post("/demo/redis-down")

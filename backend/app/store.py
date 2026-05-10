@@ -5,7 +5,7 @@ from collections import defaultdict
 
 import redis.asyncio as redis
 
-from app.models import GroupSnapshot, GroupState, Intent, ProcessingResult
+from app.models import GroupSnapshot, ProcessingResult
 
 
 class MessageStore:
@@ -22,11 +22,13 @@ class MessageStore:
         self._connected = False
 
         # In-memory fallback
-        self._messages: dict[str, str] = {}  # message_id -> status
+        self._messages: dict[str, str] = {}
         self._group_states: dict[str, dict] = {}
 
         # Per-group locks for fallback store consistency
-        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._group_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Per-message locks for atomic dedup in fallback mode
+        self._msg_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
         # Counters
         self.degraded = False
@@ -63,25 +65,41 @@ class MessageStore:
         self._connected = False
 
     # ------------------------------------------------------------------
-    # Duplicate detection
+    # Atomic message claim (dedup + reserve in one step)
     # ------------------------------------------------------------------
 
-    async def check_duplicate(self, message_id: str) -> bool:
-        """Return True if this message_id has already been processed."""
+    async def try_claim_message(self, message_id: str) -> bool:
+        """Atomically claim a message_id.
+
+        Returns True if this is the first claim (proceed with processing).
+        Returns False if already claimed (duplicate).
+
+        Redis path: SET key value NX — atomic check-and-set.
+        Memory path: per-message-id lock guarding the check + insert.
+        """
         try:
             if self._connected and self._redis:
-                return bool(await self._redis.exists(f"msg:{message_id}"))
+                result = await self._redis.set(
+                    f"msg:{message_id}", "claimed", nx=True
+                )
+                return result is not None
         except (redis.ConnectionError, redis.TimeoutError, OSError):
             self._mark_degraded()
 
-        return message_id in self._messages
-
-    # ------------------------------------------------------------------
-    # Save message result
-    # ------------------------------------------------------------------
+        # Memory fallback — protected by per-message lock
+        lock = self._msg_locks[message_id]
+        async with lock:
+            if message_id in self._messages:
+                return False
+            self._messages[message_id] = "claimed"
+            return True
 
     async def save_result(self, result: ProcessingResult) -> bool:
-        """Persist a processing result. Returns False if fallback was used."""
+        """Persist a processing result. Returns False if fallback was used.
+
+        Must only be called after a successful try_claim_message for the
+        same message_id.
+        """
         key = f"msg:{result.message_id}"
         value = result.model_dump_json()
 
@@ -105,7 +123,7 @@ class MessageStore:
     ) -> bool:
         """Persist group state snapshot. Returns False if fallback was used."""
         value = snapshot.model_dump_json()
-        lock = self._locks[group_id]
+        lock = self._group_locks[group_id]
 
         async with lock:
             try:
@@ -155,6 +173,12 @@ class MessageStore:
     # ------------------------------------------------------------------
 
     def force_degraded(self) -> None:
+        """Disconnect Redis and enter degraded mode.
+
+        The underlying Redis connection is dropped. For proper resource
+        cleanup before shutdown, call ``disconnect()`` instead.
+        """
+        self._redis = None
         self._connected = False
         self.degraded = True
 

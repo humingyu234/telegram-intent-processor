@@ -1,7 +1,6 @@
 """Message processing pipeline — the core orchestration layer."""
 
 import asyncio
-import time
 from collections import defaultdict
 
 from app.classifier import classify_message
@@ -22,8 +21,10 @@ class MessageProcessor:
 
     Concurrency model:
     - ``semaphore`` caps the number of in-flight messages globally.
-    - Per-group ``asyncio.Lock`` ensures state updates inside a single group
-      are serialised, while different groups can run concurrently.
+    - Per-group ``asyncio.Lock`` serialises state access within a group,
+      while different groups run concurrently.
+    - Dedup uses atomic ``try_claim_message`` (SET NX on Redis,
+      per-message lock on memory fallback).
     - SSE events are pushed to all connected dashboard subscribers via
       ``event_queues``.
     """
@@ -36,6 +37,7 @@ class MessageProcessor:
         self.store = store
         self._max_in_flight = max_in_flight
         self.semaphore = asyncio.Semaphore(max_in_flight)
+        self._in_flight = 0
         self._group_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
         # In-memory group state machines (loaded from store on first access)
@@ -51,11 +53,15 @@ class MessageProcessor:
     async def process(self, message: IncomingMessage) -> ProcessingResult:
         """Run the full pipeline for one message.
 
-        Pipeline: validate → dedup → classify → lock → update state →
-        store → unlock → push SSE → return result.
+        Pipeline: dedup-claim → semaphore → group-lock → classify →
+        state-update → persist → SSE.
         """
         async with self.semaphore:
-            return await self._process_impl(message)
+            self._in_flight += 1
+            try:
+                return await self._process_impl(message)
+            finally:
+                self._in_flight -= 1
 
     async def process_batch(
         self, messages: list[IncomingMessage]
@@ -89,10 +95,108 @@ class MessageProcessor:
             return sm.snapshot()
         return GroupSnapshot(group_id=group_id)
 
-    async def get_or_create_state_machine(
+    def all_group_snapshots(self) -> list[dict]:
+        return [
+            sm.snapshot().model_dump()
+            for sm in self._state_machines.values()
+        ]
+
+    # ------------------------------------------------------------------
+    # Dashboard helpers
+    # ------------------------------------------------------------------
+
+    def in_flight_count(self) -> int:
+        return self._in_flight
+
+    @property
+    def max_in_flight(self) -> int:
+        return self._max_in_flight
+
+    # ------------------------------------------------------------------
+    # Internal pipeline
+    # ------------------------------------------------------------------
+
+    async def _process_impl(
+        self, message: IncomingMessage
+    ) -> ProcessingResult:
+        # — step 1: atomic dedup claim —
+        claimed = await self.store.try_claim_message(message.message_id)
+        if not claimed:
+            self.store.duplicate_count += 1
+            return ProcessingResult(
+                message_id=message.message_id,
+                group_id=message.group_id,
+                user_id=message.user_id,
+                text=message.text,
+                intent=Intent.OTHER,
+                tags=[],
+                status=ProcessingStatus.DUPLICATE,
+                reason="duplicate message_id",
+            )
+
+        # — step 2: per-group lock (protects get_or_create → classify → apply → save) —
+        lock = self._group_locks[message.group_id]
+        async with lock:
+            sm = await self._get_or_create_state_machine_locked(
+                message.group_id
+            )
+            group_ctx = sm.snapshot()
+            intent, tags = classify_message(
+                message.text, group_context=group_ctx
+            )
+            sm.apply(intent, tags)
+            snapshot = sm.snapshot()
+            used_fallback = not await self.store.save_group_state(
+                message.group_id, snapshot
+            )
+
+        # — step 3: persist result (outside group lock) —
+        result = ProcessingResult(
+            message_id=message.message_id,
+            group_id=message.group_id,
+            user_id=message.user_id,
+            text=message.text,
+            intent=intent,
+            tags=tags,
+            status=(
+                ProcessingStatus.FALLBACK
+                if used_fallback
+                else ProcessingStatus.PROCESSED
+            ),
+            reason=(
+                "Redis unavailable, used fallback store"
+                if used_fallback
+                else ""
+            ),
+            group_state_after=snapshot.current_state,
+            fallback_used=used_fallback,
+        )
+
+        used_fallback_for_result = not await self.store.save_result(result)
+        if used_fallback_for_result:
+            result = result.model_copy(
+                update={
+                    "status": ProcessingStatus.FALLBACK,
+                    "reason": "Redis unavailable, used fallback store",
+                    "fallback_used": True,
+                }
+            )
+
+        if not used_fallback and not used_fallback_for_result:
+            self.store.processed_count += 1
+
+        # — step 4: push SSE —
+        await self._broadcast(result, snapshot)
+
+        return result
+
+    async def _get_or_create_state_machine_locked(
         self, group_id: str
     ) -> GroupStateMachine:
-        """Load persisted state or create a fresh state machine."""
+        """Load persisted state or create a fresh state machine.
+
+        Must be called while holding the per-group lock for *group_id*.
+        """
         if group_id in self._state_machines:
             return self._state_machines[group_id]
 
@@ -113,94 +217,6 @@ class MessageProcessor:
         self._state_machines[group_id] = sm
         return sm
 
-    # ------------------------------------------------------------------
-    # Dashboard snapshot helpers
-    # ------------------------------------------------------------------
-
-    def in_flight_count(self) -> int:
-        # semaphore._value is the number of available slots
-        return self._max_in_flight - self.semaphore._value  # type: ignore[attr-defined]
-
-    @property
-    def max_in_flight(self) -> int:
-        return self._max_in_flight
-
-    def all_group_snapshots(self) -> list[dict]:
-        return [sm.snapshot().model_dump() for sm in self._state_machines.values()]
-
-    # ------------------------------------------------------------------
-    # Internal pipeline
-    # ------------------------------------------------------------------
-
-    async def _process_impl(
-        self, message: IncomingMessage
-    ) -> ProcessingResult:
-        # — dedup —
-        is_dup = await self.store.check_duplicate(message.message_id)
-        if is_dup:
-            self.store.duplicate_count += 1
-            return ProcessingResult(
-                message_id=message.message_id,
-                group_id=message.group_id,
-                user_id=message.user_id,
-                text=message.text,
-                intent=Intent.OTHER,
-                tags=[],
-                status=ProcessingStatus.DUPLICATE,
-                reason="duplicate message_id",
-            )
-
-        # — classify with group context —
-        sm = await self.get_or_create_state_machine(message.group_id)
-        group_ctx = sm.snapshot()
-        intent, tags = classify_message(message.text, group_context=group_ctx)
-
-        # — update state (per-group lock) —
-        lock = self._group_locks[message.group_id]
-        async with lock:
-            sm.apply(intent, tags)
-            snapshot = sm.snapshot()
-            used_fallback = not await self.store.save_group_state(
-                message.group_id, snapshot
-            )
-
-        # — persist result —
-        result = ProcessingResult(
-            message_id=message.message_id,
-            group_id=message.group_id,
-            user_id=message.user_id,
-            text=message.text,
-            intent=intent,
-            tags=tags,
-            status=ProcessingStatus.FALLBACK
-            if used_fallback
-            else ProcessingStatus.PROCESSED,
-            reason="Redis unavailable, used fallback store"
-            if used_fallback
-            else "",
-            group_state_after=snapshot.current_state,
-            fallback_used=used_fallback,
-        )
-
-        used_fallback_for_result = not await self.store.save_result(result)
-        if used_fallback_for_result:
-            self.store.fallback_count += 1
-            result = result.model_copy(
-                update={
-                    "status": ProcessingStatus.FALLBACK,
-                    "reason": "Redis unavailable, used fallback store",
-                    "fallback_used": True,
-                }
-            )
-
-        if not used_fallback and not used_fallback_for_result:
-            self.store.processed_count += 1
-
-        # — push SSE —
-        await self._broadcast(result, snapshot)
-
-        return result
-
     async def _broadcast(
         self, result: ProcessingResult, snapshot: GroupSnapshot
     ) -> None:
@@ -209,7 +225,7 @@ class MessageProcessor:
             "result": result.model_dump(),
             "group_snapshot": snapshot.model_dump(),
             "health": self.store.health(),
-            "in_flight": self.in_flight_count(),
+            "in_flight": self._in_flight,
         }
         dead: list[asyncio.Queue] = []
         for q in self._subscribers:
