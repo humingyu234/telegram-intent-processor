@@ -225,7 +225,7 @@ class MessageProcessor:
             "result": result.model_dump(),
             "group_snapshot": snapshot.model_dump(),
             "health": self.store.health(),
-            "in_flight": self._in_flight,
+            "in_flight": self._in_flight - 1,  # exclude self, not yet decr'd in process()
         }
         dead: list[asyncio.Queue] = []
         for q in self._subscribers:
