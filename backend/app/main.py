@@ -85,7 +85,6 @@ async def messages(body: MessageRequest) -> dict[str, Any]:
     try:
         result = await processor.process(msg)
     except Exception:
-        store.invalid_count += 1
         raise HTTPException(status_code=500, detail="Internal processing error")
 
     return result.model_dump()

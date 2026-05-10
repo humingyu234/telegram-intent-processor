@@ -4,14 +4,65 @@
 
 ---
 
+## 架构
+
+```mermaid
+flowchart TB
+    subgraph Entry[入口]
+        API[\"POST /messages<br/>POST /messages/batch<br/>GET /health /stats /dashboard\"]
+    end
+
+    subgraph Pipeline[消息处理管线]
+        direction LR
+        V[Pydantic<br/>校验] --> D[原子去重<br/>SET NX]
+        D --> C[意图分类<br/>关键词+正则]
+        C --> L[每群独立锁<br/>asyncio.Lock]
+        L --> S[群状态机<br/>IDLE→ESCALATED]
+        S --> P[持久化]
+    end
+
+    subgraph Storage[存储层 — 三模式]
+        direction TB
+        Redis[(Redis<br/>healthy)]
+        Memory[(内存 Dict<br/>fallback)]
+        P -->|Primary| Redis
+        P -.->|degraded| Memory
+    end
+
+    subgraph UI[实时面板]
+        Dashboard[SSE Dashboard<br/>单文件 HTML]
+        SSE[GET /events<br/>Server-Sent Events]
+    end
+
+    API --> Pipeline
+    S -.->|推送事件| SSE
+    SSE --> Dashboard
+```
+
+### 数据流
+
+```
+POST /messages  →  校验  →  去重  →  分类  →  群锁  →  状态机  →  Redis  →  SSE  →  Dashboard
+                                    ↓                              ↓
+                              complaint?                     fallback?
+                              最高优先级                     自动降级
+```
+
+---
+
 ## 快速启动
 
 ```bash
-# 1. 启动 Redis（二选一）
-docker compose up -d redis          # Docker（推荐）
-# 或: sudo apt install redis-server && redis-server --daemonize yes
+# 一条命令，30 秒后打开 http://localhost:8000/dashboard
+docker compose up
+```
 
-# 2. 启动后端
+> 首次构建需要拉取镜像并安装依赖，大约 1-2 分钟。之后秒启动。
+
+### 开发模式（手动启动）
+
+```bash
+docker compose up -d redis    # 只启动 Redis
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
@@ -21,8 +72,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 打开 **http://localhost:8000/dashboard** 进入实时面板。
 
-> Redis 启动后 `/health` 显示 `healthy`，消息写入 Redis。
-> 没有 Redis 时系统使用本地存储模式，`/health` 显示 `local`，功能不受影响。
+---
+
+## 演示截图
+
+> 录屏 GIF 放在 `docs/` 目录下，在 README 中引用。
+
+| 场景 | 说明 |
+|------|------|
+| Dashboard 全貌 | 各 Demo 按钮点击一轮的效果 |
+| Burst 实时流 | 100 条消息实时处理和展示 |
+| Redis 降级 | 断开 Redis 后系统继续运行 |
 
 ---
 
@@ -103,6 +163,12 @@ POST /messages
 cd backend
 source .venv/bin/activate
 pytest tests/ -v
+```
+
+容器内：
+
+```bash
+docker compose exec app pytest tests/ -v
 ```
 
 覆盖 6 类边界契约：

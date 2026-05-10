@@ -99,11 +99,8 @@ class MessageProcessor:
             return sm.snapshot()
         return GroupSnapshot(group_id=group_id)
 
-    def all_group_snapshots(self) -> list[dict]:
-        return [
-            sm.snapshot().model_dump()
-            for sm in self._state_machines.values()
-        ]
+    def all_group_snapshots(self) -> list[GroupSnapshot]:
+        return [sm.snapshot() for sm in self._state_machines.values()]
 
     # ------------------------------------------------------------------
     # Dashboard helpers
