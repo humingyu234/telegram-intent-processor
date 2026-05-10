@@ -65,9 +65,16 @@
 
 ### 故意没做
 
-- 没有 README（按 CLAUDE.md Skill 4，演示优先交付阶段做）
 - 没有接真实 Redis（当前开发环境无 Redis，启动即 degraded）
 - 没有做压测/监控系统
+
+---
+
+## 阶段 3：README + 收尾 — 已完成 (2026-05-10)
+
+- 添加 README.md（项目描述、快速启动、Dashboard 说明、API 文档、测试命令、设计说明、取舍）
+- 添加 requirements.txt
+- 更新 PROGRESS.md
 
 ### 如何运行
 
