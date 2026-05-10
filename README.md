@@ -7,6 +7,11 @@
 ## 快速启动
 
 ```bash
+# 1. 启动 Redis（二选一）
+docker compose up -d redis          # Docker（推荐）
+# 或: sudo apt install redis-server && redis-server --daemonize yes
+
+# 2. 启动后端
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
@@ -16,7 +21,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 打开 **http://localhost:8000/dashboard** 进入实时面板。
 
-> 没有 Redis 也能跑 —— 系统自动降级到内存存储，Dashboard 上会显示 degraded 状态。
+> Redis 启动后 `/health` 显示 `healthy`，消息写入 Redis。
+> 没有 Redis 时系统使用本地存储模式，`/health` 显示 `local`，功能不受影响。
 
 ---
 
@@ -48,9 +54,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/process` | 处理单条消息 |
-| POST | `/process/batch` | 批量处理，返回汇总统计 |
-| GET | `/health` | 系统健康 |
+| POST | `/messages` | 处理单条消息 |
+| POST | `/messages/batch` | 批量处理，返回汇总统计 |
+| GET | `/groups/{group_id}/state` | 查看群状态 |
+| GET | `/stats` | 处理统计（独立于 health） |
+| GET | `/health` | Redis 状态和系统健康 |
 | GET | `/dashboard` | 实时 Dashboard 页面 |
 | GET | `/events` | SSE 事件流 |
 
@@ -59,7 +67,7 @@ API 文档：**http://localhost:8000/docs**
 ### 请求示例
 
 ```json
-POST /process
+POST /messages
 {
   "message": {
     "message_id": "msg_001",

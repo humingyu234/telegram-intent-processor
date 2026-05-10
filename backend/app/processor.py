@@ -150,11 +150,12 @@ class MessageProcessor:
             )
             sm.apply(intent, tags)
             snapshot = sm.snapshot()
-            used_fallback = not await self.store.save_group_state(
+            await self.store.save_group_state(
                 message.group_id, snapshot
             )
 
         # — step 3: persist result (outside group lock) —
+        is_fallback = self.store.degraded
         result = ProcessingResult(
             message_id=message.message_id,
             group_id=message.group_id,
@@ -162,26 +163,21 @@ class MessageProcessor:
             text=message.text,
             intent=intent,
             tags=tags,
-            status=(
-                ProcessingStatus.FALLBACK
-                if used_fallback
-                else ProcessingStatus.PROCESSED
-            ),
+            status=ProcessingStatus.PROCESSED,
             reason=(
-                "Redis unavailable, used fallback store"
-                if used_fallback
+                "Redis unavailable, using fallback storage"
+                if is_fallback
                 else ""
             ),
             group_state_after=snapshot.current_state,
-            fallback_used=used_fallback,
+            fallback_used=is_fallback,
         )
 
-        used_fallback_for_result = not await self.store.save_result(result)
-        if used_fallback_for_result:
+        await self.store.save_result(result)
+        if is_fallback:
             result = result.model_copy(
                 update={
-                    "status": ProcessingStatus.FALLBACK,
-                    "reason": "Redis unavailable, used fallback store",
+                    "reason": "Redis unavailable, using fallback storage",
                     "fallback_used": True,
                 }
             )

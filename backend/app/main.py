@@ -73,8 +73,8 @@ def _aggregate(
 # Core endpoint
 # ---------------------------------------------------------------------------
 
-@app.post("/process")
-async def process_message(body: MessageRequest) -> dict[str, Any]:
+@app.post("/messages")
+async def messages(body: MessageRequest) -> dict[str, Any]:
     """Process a single Telegram-style group message."""
     try:
         msg = body.message
@@ -91,14 +91,46 @@ async def process_message(body: MessageRequest) -> dict[str, Any]:
     return result.model_dump()
 
 
-@app.post("/process/batch")
-async def process_batch(body: list[MessageRequest]) -> BatchResult:
+@app.post("/messages/batch")
+async def messages_batch(body: list[MessageRequest]) -> BatchResult:
     """Process multiple messages concurrently and return summary stats."""
     messages = [req.message for req in body]
     t0 = time.monotonic()
     results = await processor.process_batch(messages)
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     return _aggregate(results, elapsed_ms)
+
+
+# ---------------------------------------------------------------------------
+# Group state
+# ---------------------------------------------------------------------------
+
+@app.get("/groups/{group_id}/state")
+async def group_state(group_id: str) -> dict[str, Any]:
+    snap = await processor.get_group_snapshot(group_id)
+    return {
+        "group_id": group_id,
+        "snapshot": snap.model_dump(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+@app.get("/stats")
+async def stats() -> dict[str, Any]:
+    h = store.health()
+    return {
+        "total_processed": h["total_processed"],
+        "redis_persisted": h["redis_persisted"],
+        "fallback_writes": h["fallback_writes"],
+        "invalid_messages": h["invalid_messages"],
+        "duplicate_messages": h["duplicate_messages"],
+        "group_count": len(processor._state_machines),
+        "in_flight_current": processor.in_flight_count(),
+        "in_flight_max": MAX_IN_FLIGHT,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -44,7 +44,7 @@ async def test_health_returns_valid_data(client):
 @pytest.mark.asyncio
 async def test_process_valid_message(client):
     resp = await client.post(
-        "/process",
+        "/messages",
         json={
             "message": {
                 "message_id": "http-test-1",
@@ -70,10 +70,10 @@ async def test_process_duplicate_message(client):
             "text": "hello",
         }
     }
-    r1 = await client.post("/process", json=msg)
+    r1 = await client.post("/messages", json=msg)
     assert r1.status_code == 200
 
-    r2 = await client.post("/process", json=msg)
+    r2 = await client.post("/messages", json=msg)
     assert r2.status_code == 200
     assert r2.json()["status"] == "duplicate"
 
@@ -81,7 +81,7 @@ async def test_process_duplicate_message(client):
 @pytest.mark.asyncio
 async def test_process_malformed_rejected(client):
     resp = await client.post(
-        "/process",
+        "/messages",
         json={
             "message": {
                 "message_id": "bad",
@@ -151,8 +151,8 @@ async def test_batch_endpoint_aggregates(client):
         }
         for i in range(10)
     ]
-    resp = await client.post("/process/batch", json=messages)
+    resp = await client.post("/messages/batch", json=messages)
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 10
-    assert data["processed"] + data["fallback_writes"] == 10
+    assert data["processed"] == 10

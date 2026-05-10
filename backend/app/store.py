@@ -12,11 +12,13 @@ class MessageStore:
     """Stores processed messages and group state.
 
     Primary: Redis. Fallback: in-memory dict.
-    When Redis is unreachable, the store degrades gracefully and exposes
-    a ``degraded`` flag.
 
-    Startup without Redis is NOT degraded — the store just works in
-    local-only mode. Degraded means "Redis was connected and then lost".
+    Three operating modes:
+    - **Redis mode** — Redis connected, all writes go to Redis.
+    - **Local mode** — no Redis at startup, all writes go to memory.
+      NOT degraded. Memory is the primary store here.
+    - **Degraded mode** — Redis WAS connected, then failed. Writes go
+      to memory and are counted as fallback writes.
     """
 
     def __init__(self, redis_url: str = "redis://localhost:6379") -> None:
@@ -35,14 +37,11 @@ class MessageStore:
 
         # Counters
         self.degraded = False
-        self.redis_persisted = 0   # written to Redis
-        self.fallback_count = 0    # written to memory fallback
+        self.total_stored = 0     # all successful message writes
+        self.redis_persisted = 0  # subset: written to Redis
+        self.fallback_count = 0   # subset: written to memory while degraded
         self.invalid_count = 0
         self.duplicate_count = 0
-
-    @property
-    def total_processed(self) -> int:
-        return self.redis_persisted + self.fallback_count
 
     # ------------------------------------------------------------------
     # Connection
@@ -60,7 +59,6 @@ class MessageStore:
             self._connected = True
             self.degraded = False
         except (redis.ConnectionError, redis.TimeoutError, OSError):
-            # No Redis at startup — not an error, just local mode
             self._connected = False
             self.degraded = False
 
@@ -94,7 +92,6 @@ class MessageStore:
         except (redis.ConnectionError, redis.TimeoutError, OSError):
             self._mark_degraded()
 
-        # Memory fallback — protected by per-message lock
         lock = self._msg_locks[message_id]
         async with lock:
             if message_id in self._messages:
@@ -102,22 +99,33 @@ class MessageStore:
             self._messages[message_id] = "claimed"
             return True
 
-    async def save_result(self, result: ProcessingResult) -> bool:
-        """Persist a processing result. Returns False if fallback was used."""
+    # ------------------------------------------------------------------
+    # Save message result
+    # ------------------------------------------------------------------
+
+    async def save_result(self, result: ProcessingResult) -> None:
+        """Persist a processing result.
+
+        In Redis mode: writes to Redis, increments redis_persisted.
+        In local mode: writes to memory (not a fallback).
+        In degraded mode: writes to memory, increments fallback_count.
+        """
         key = f"msg:{result.message_id}"
         value = result.model_dump_json()
 
         try:
             if self._connected and self._redis:
                 await self._redis.set(key, value)
+                self.total_stored += 1
                 self.redis_persisted += 1
-                return True
+                return
         except (redis.ConnectionError, redis.TimeoutError, OSError):
             self._mark_degraded()
 
         self._messages[result.message_id] = value
-        self.fallback_count += 1
-        return False
+        self.total_stored += 1
+        if self.degraded:
+            self.fallback_count += 1
 
     # ------------------------------------------------------------------
     # Group state
@@ -125,8 +133,8 @@ class MessageStore:
 
     async def save_group_state(
         self, group_id: str, snapshot: GroupSnapshot
-    ) -> bool:
-        """Persist group state snapshot. Returns False if fallback was used."""
+    ) -> None:
+        """Persist group state snapshot."""
         value = snapshot.model_dump_json()
         lock = self._group_locks[group_id]
 
@@ -134,12 +142,11 @@ class MessageStore:
             try:
                 if self._connected and self._redis:
                     await self._redis.set(f"group:{group_id}", value)
-                    return True
+                    return
             except (redis.ConnectionError, redis.TimeoutError, OSError):
                 self._mark_degraded()
 
             self._group_states[group_id] = snapshot.model_dump()
-            return False
 
     async def get_group_state(
         self, group_id: str
@@ -164,14 +171,12 @@ class MessageStore:
     # ------------------------------------------------------------------
 
     def health(self) -> dict:
-        status = "healthy"
+        status = "healthy" if self._connected else "local"
         if self.degraded:
             status = "degraded"
-        elif not self._connected:
-            status = "local"
         return {
             "redis": status,
-            "total_processed": self.total_processed,
+            "total_processed": self.total_stored,
             "redis_persisted": self.redis_persisted,
             "fallback_writes": self.fallback_count,
             "invalid_messages": self.invalid_count,
@@ -187,6 +192,7 @@ class MessageStore:
         self._messages.clear()
         self._group_states.clear()
         self._msg_locks.clear()
+        self.total_stored = 0
         self.redis_persisted = 0
         self.fallback_count = 0
         self.invalid_count = 0
@@ -207,9 +213,6 @@ class MessageStore:
     # ------------------------------------------------------------------
 
     def _mark_degraded(self) -> None:
-        # Only mark degraded if we actually had a Redis connection.
-        # If Redis was never connected (started in local mode), it's
-        # a no-op — local mode is normal, not degraded.
         if self._connected:
             self.degraded = True
             self._connected = False

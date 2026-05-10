@@ -146,12 +146,12 @@ class TestRedisDisconnectUsesFallbackStore:
             text="hello", intent=Intent.OTHER, tags=[],
             status=ProcessingStatus.FALLBACK, fallback_used=True,
         )
-        ok = asyncio.run(connected_store.save_result(result))
-        assert ok is False  # fallback used
+        asyncio.run(connected_store.save_result(result))
+        # In degraded mode, fallback counter is incremented
+        assert connected_store.fallback_count == 1
 
         snap = GroupSnapshot(group_id="g1", current_state=GroupState.IDLE)
-        ok2 = asyncio.run(connected_store.save_group_state("g1", snap))
-        assert ok2 is False
+        asyncio.run(connected_store.save_group_state("g1", snap))
 
         loaded = asyncio.run(connected_store.get_group_state("g1"))
         assert loaded is not None
