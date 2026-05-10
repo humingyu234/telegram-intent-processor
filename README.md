@@ -6,13 +6,10 @@
 
 ## 架构
 
-```mermaid
-flowchart LR
-    A[POST /messages] --> B[Validate] --> C[Dedup] --> D[Classify] --> E[Lock] --> F[State Machine] --> G[Persist]
-    G --> H[(Redis)]
-    G -.->|fallback| I[(Memory)]
-    F --> J[SSE] --> K[Dashboard]
-```
+
+POST /messages -> Validate -> Dedup -> Classify -> Lock -> State Machine -> Redis/fallback -> SSE -> Dashboard
+                          complaint > help > pricing > product > other       healthy / degraded
+
 
 
 ---
