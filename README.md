@@ -76,36 +76,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 API 文档：**http://localhost:8000/docs**
 
-### 请求示例
+### 快速体验
 
-```json
-POST /messages
-{
-  "message": {
-    "message_id": "msg_001",
-    "group_id": "group_01",
-    "user_id": "user_01",
-    "text": "这个多少钱"
-  }
-}
+```bash
+curl -s http://localhost:8000/messages   -H "Content-Type: application/json"   -d '{"message": {"message_id": "m1", "group_id": "g1", "user_id": "u1", "text": "这个多少钱"}}'
 ```
 
-### 响应
-
-```json
-{
-  "message_id": "msg_001",
-  "group_id": "group_01",
-  "user_id": "user_01",
-  "text": "这个多少钱",
-  "intent": "pricing",
-  "tags": ["sales_lead", "needs_reply"],
-  "status": "processed",
-  "reason": "",
-  "group_state_after": "PRICING_DISCUSSION",
-  "fallback_used": false
-}
-```
+返回字段：`intent` `tags` `status` `group_state_after` `fallback_used` 等。完整 Schema 见 **/docs**。
 
 ---
 
