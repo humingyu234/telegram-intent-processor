@@ -7,37 +7,18 @@
 ## 架构
 
 ```mermaid
-flowchart TB
-    subgraph Entry[入口]
-        API[\"POST /messages<br/>POST /messages/batch<br/>GET /health /stats /dashboard\"]
-    end
-
-    subgraph Pipeline[消息处理管线]
-        direction LR
-        V[Pydantic<br/>校验] --> D[原子去重<br/>SET NX]
-        D --> C[意图分类<br/>关键词+正则]
-        C --> L[每群独立锁<br/>asyncio.Lock]
-        L --> S[群状态机<br/>IDLE→ESCALATED]
-        S --> P[持久化]
-    end
-
-    subgraph Storage[存储层 — 三模式]
-        direction TB
-        Redis[(Redis<br/>healthy)]
-        Memory[(内存 Dict<br/>fallback)]
-        P -->|Primary| Redis
-        P -.->|degraded| Memory
-    end
-
-    subgraph UI[实时面板]
-        Dashboard[SSE Dashboard<br/>单文件 HTML]
-        SSE[GET /events<br/>Server-Sent Events]
-    end
-
-    API --> Pipeline
-    S -.->|推送事件| SSE
-    SSE --> Dashboard
+flowchart LR
+    A[POST /messages] --> B[Pydantic Validate]
+    B --> C[Atomic Dedup SET NX]
+    C --> D[Intent Classifier]
+    D --> E[Per-Group Lock]
+    E --> F[State Machine]
+    F --> G[(Redis Primary)]
+    F -.->|degraded| H[(Memory Fallback)]
+    F --> I[SSE Broadcast]
+    I --> J[Dashboard HTML]
 ```
+
 
 ### 数据流
 
