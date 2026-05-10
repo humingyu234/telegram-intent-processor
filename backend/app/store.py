@@ -172,6 +172,12 @@ class MessageStore:
     # Force degrade / recover (for demo)
     # ------------------------------------------------------------------
 
+    def reset_counters(self) -> None:
+        self.processed_count = 0
+        self.invalid_count = 0
+        self.duplicate_count = 0
+        self.fallback_count = 0
+
     def force_degraded(self) -> None:
         """Disconnect Redis and enter degraded mode.
 

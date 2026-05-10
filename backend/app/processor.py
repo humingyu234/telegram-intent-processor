@@ -70,6 +70,10 @@ class MessageProcessor:
         tasks = [self.process(m) for m in messages]
         return await asyncio.gather(*tasks)
 
+    def reset(self) -> None:
+        self._state_machines.clear()
+        self._in_flight = 0
+
     # ------------------------------------------------------------------
     # SSE subscriber management
     # ------------------------------------------------------------------

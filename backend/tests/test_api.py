@@ -6,9 +6,18 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app, processor, store
 
 
+@pytest.fixture(autouse=True)
+def _reset():
+    """Ensure clean state between tests."""
+    store.reset_counters()
+    store.force_degraded()
+    processor.reset()
+    store._messages.clear()
+    store._group_states.clear()
+
+
 @pytest.fixture
 def client():
-    store.force_degraded()  # no Redis in CI
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://test")
 
