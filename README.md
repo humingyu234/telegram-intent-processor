@@ -76,14 +76,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 API 文档：**http://localhost:8000/docs**
 
-### 快速体验
-
-```bash
-curl -s http://localhost:8000/messages   -H "Content-Type: application/json"   -d '{"message": {"message_id": "m1", "group_id": "g1", "user_id": "u1", "text": "这个多少钱"}}'
-```
-
-返回字段：`intent` `tags` `status` `group_state_after` `fallback_used` 等。完整 Schema 见 **/docs**。
-
 ---
 
 ## 测试
