@@ -9,11 +9,9 @@ from app.main import app, processor, store
 @pytest.fixture(autouse=True)
 def _reset():
     """Ensure clean state between tests."""
-    store.reset_counters()
+    store.reset_all()
     store.force_degraded()
     processor.reset()
-    store._messages.clear()
-    store._group_states.clear()
 
 
 @pytest.fixture
@@ -36,8 +34,9 @@ async def test_health_returns_valid_data(client):
     resp = await client.get("/health")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["redis"] in ("healthy", "degraded")
-    assert "processed_messages" in data
+    assert data["redis"] in ("healthy", "local", "degraded")
+    assert "total_processed" in data
+    assert "redis_persisted" in data
     assert "in_flight_messages" in data
     assert "max_in_flight_limit" in data
 

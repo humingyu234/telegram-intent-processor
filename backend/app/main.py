@@ -110,10 +110,11 @@ async def health() -> SystemHealth:
     h = store.health()
     return SystemHealth(
         redis=h["redis"],
-        processed_messages=h["processed_messages"],
+        total_processed=h["total_processed"],
+        redis_persisted=h["redis_persisted"],
+        fallback_writes=h["fallback_writes"],
         invalid_messages=h["invalid_messages"],
         duplicate_messages=h["duplicate_messages"],
-        fallback_writes=h["fallback_writes"],
         in_flight_messages=processor.in_flight_count(),
         max_in_flight_limit=MAX_IN_FLIGHT,
     )
@@ -243,6 +244,13 @@ async def demo_load() -> BatchResult:
     results = await processor.process_batch(messages)
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     return _aggregate(results, elapsed_ms)
+
+
+@app.post("/demo/reset")
+async def demo_reset() -> dict[str, str]:
+    store.reset_all()
+    processor.reset()
+    return {"status": "reset", "message": "All demo state cleared"}
 
 
 @app.post("/demo/redis-down")

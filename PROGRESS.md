@@ -70,6 +70,17 @@
 
 ---
 
+### UX polish (2026-05-10)
+
+- 默认状态改为 "local"（没有 Redis 但健康），不再是 "degraded"
+- degraded 只在 Redis 连接成功后断开时触发
+- 健康面板拆为 Total Processed / Redis Persisted / Fallback Writes
+- 新增 Reset Demo State 按钮，一键清空所有状态和计数
+- Group State Panel 意图计数格式化显示
+- README 说明 needs_human_attention 粘性设计
+
+---
+
 ## 阶段 3：README + 收尾 — 已完成 (2026-05-10)
 
 - 添加 README.md（项目描述、快速启动、Dashboard 说明、API 文档、测试命令、设计说明、取舍）

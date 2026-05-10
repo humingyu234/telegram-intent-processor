@@ -186,9 +186,6 @@ class MessageProcessor:
                 }
             )
 
-        if not used_fallback and not used_fallback_for_result:
-            self.store.processed_count += 1
-
         # — step 4: push SSE —
         await self._broadcast(result, snapshot)
 

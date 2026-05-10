@@ -23,11 +23,12 @@ h2 { font-size: 14px; color: var(--muted); margin-bottom: 12px; font-weight: nor
 .panel h3 { font-size: 13px; margin-bottom: 10px; color: var(--accent); }
 .full { grid-column: 1 / -1; }
 .health-row { display: flex; gap: 16px; flex-wrap: wrap; }
-.health-item { text-align: center; min-width: 80px; }
-.health-value { font-size: 24px; font-weight: 700; }
-.health-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.health-item { text-align: center; min-width: 75px; }
+.health-value { font-size: 22px; font-weight: 700; }
+.health-label { font-size: 10px; color: var(--muted); margin-top: 2px; }
 .green { color: var(--green); } .red { color: var(--red); }
 .yellow { color: var(--yellow); } .purple { color: var(--purple); }
+.orange { color: var(--orange); }
 .msg-row { font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border);
   display: flex; gap: 8px; align-items: center; }
 .msg-row:last-child { border-bottom: none; }
@@ -62,12 +63,12 @@ h2 { font-size: 14px; color: var(--muted); margin-bottom: 12px; font-weight: nor
     <h3>System Health</h3>
     <div class="health-row" id="health-metrics">
       <div class="health-item"><div class="health-value green" id="h-redis">—</div><div class="health-label">Redis</div></div>
-      <div class="health-item"><div class="health-value" id="h-processed">0</div><div class="health-label">Processed</div></div>
+      <div class="health-item"><div class="health-value" id="h-total">0</div><div class="health-label">Total Processed</div></div>
+      <div class="health-item"><div class="health-value green" id="h-persisted">0</div><div class="health-label">Redis Persisted</div></div>
+      <div class="health-item"><div class="health-value orange" id="h-fallback">0</div><div class="health-label">Fallback Writes</div></div>
       <div class="health-item"><div class="health-value yellow" id="h-invalid">0</div><div class="health-label">Invalid</div></div>
-      <div class="health-item"><div class="health-value" id="h-duplicates">0</div><div class="health-label">Duplicates</div></div>
-      <div class="health-item"><div class="health-value red" id="h-fallback">0</div><div class="health-label">Fallback Writes</div></div>
-      <div class="health-item"><div class="health-value purple" id="h-inflight">0</div><div class="health-label">In-flight Messages</div></div>
-      <div class="health-item"><div class="health-value" id="h-max">50</div><div class="health-label">Max In-flight</div></div>
+      <div class="health-item"><div class="health-value yellow" id="h-duplicates">0</div><div class="health-label">Duplicates</div></div>
+      <div class="health-item"><div class="health-value purple" id="h-inflight">0</div><div class="health-label">In-flight</div></div>
     </div>
   </div>
 
@@ -94,11 +95,12 @@ h2 { font-size: 14px; color: var(--muted); margin-bottom: 12px; font-weight: nor
     <h3>Demo Controls</h3>
     <div class="btn-row">
       <button class="btn" onclick="demo('sample')">Send Sample Message</button>
-      <button class="btn" onclick="demo('burst')">Run Visual Burst (100msgs × 10 groups)</button>
-      <button class="btn" onclick="demo('load')">Run Load Demo (1200msgs × 50 groups)</button>
+      <button class="btn" onclick="demo('burst')">Run Visual Burst</button>
+      <button class="btn" onclick="demo('load')">Run Load Demo</button>
       <button class="btn danger" onclick="demo('redis-down')">Simulate Redis Down</button>
       <button class="btn" onclick="demo('redis-recover')">Recover Redis</button>
-      <button class="btn danger" onclick="demo('malformed')">Send Malformed Message</button>
+      <button class="btn danger" onclick="demo('malformed')">Send Malformed</button>
+      <button class="btn" onclick="demo('reset'); location.reload();">Reset Demo State</button>
     </div>
   </div>
 
@@ -130,6 +132,18 @@ function demo(action) {
     .catch(err => console.error(err));
 }
 
+function formatCounts(counts) {
+  if (!counts || Object.keys(counts).length === 0) return '—';
+  return Object.entries(counts)
+    .map(([k, v]) => '<span style="color:var(--purple)">' + k + '</span>: ' + v)
+    .join(' &nbsp;');
+}
+
+function redisClass(status) {
+  if (status === 'healthy' || status === 'local') return 'green';
+  return 'red';
+}
+
 // SSE
 const evtSource = new EventSource('/events');
 evtSource.onmessage = function(e) {
@@ -142,15 +156,16 @@ evtSource.onmessage = function(e) {
 
   // Health
   document.getElementById('h-redis').textContent = h.redis;
-  document.getElementById('h-redis').className = 'health-value ' + (h.redis === 'healthy' ? 'green' : 'red');
-  document.getElementById('h-processed').textContent = h.processed_messages;
-  document.getElementById('h-invalid').textContent = h.invalid_messages;
-  document.getElementById('h-duplicates').textContent = h.duplicate_messages;
-  document.getElementById('h-fallback').textContent = h.fallback_writes;
+  document.getElementById('h-redis').className = 'health-value ' + redisClass(h.redis);
+  document.getElementById('h-total').textContent = h.total_processed || 0;
+  document.getElementById('h-persisted').textContent = h.redis_persisted || 0;
+  document.getElementById('h-fallback').textContent = h.fallback_writes || 0;
+  document.getElementById('h-invalid').textContent = h.invalid_messages || 0;
+  document.getElementById('h-duplicates').textContent = h.duplicate_messages || 0;
   document.getElementById('h-inflight').textContent = event.in_flight;
 
   // Message stream
-  const statusCls = { processed: 'green', duplicate: 'yellow', invalid: 'red', fallback: 'red', failed: 'red' };
+  const statusCls = { processed: 'green', duplicate: 'yellow', invalid: 'red', fallback: 'orange', failed: 'red' };
   const tagSpans = r.tags.map(t => {
     let cls = 'tag';
     if (t === 'urgent' || t === 'billing_dispute') cls += ' urgent';
@@ -187,9 +202,8 @@ evtSource.onmessage = function(e) {
       '<span>' + g.current_state + '</span>' +
       attn +
       ' | msgs: ' + g.message_count +
-      ' | counts: ' + JSON.stringify(g.intent_counts) +
-      ' | last: ' + (g.last_intent || '—') +
-      ' | tags: ' + (g.recent_tags || []).join(', ') +
+      ' | ' + formatCounts(g.intent_counts) +
+      ' | last: <span style="color:var(--accent)">' + (g.last_intent || '—') + '</span>' +
       '</div>';
   }
   groupEl.innerHTML = gHtml || '<div style="color:var(--muted)">No groups yet.</div>';

@@ -13,7 +13,10 @@ class MessageStore:
 
     Primary: Redis. Fallback: in-memory dict.
     When Redis is unreachable, the store degrades gracefully and exposes
-    a ``degraded`` flag so the rest of the system can surface the status.
+    a ``degraded`` flag.
+
+    Startup without Redis is NOT degraded — the store just works in
+    local-only mode. Degraded means "Redis was connected and then lost".
     """
 
     def __init__(self, redis_url: str = "redis://localhost:6379") -> None:
@@ -32,10 +35,14 @@ class MessageStore:
 
         # Counters
         self.degraded = False
-        self.processed_count = 0
+        self.redis_persisted = 0   # written to Redis
+        self.fallback_count = 0    # written to memory fallback
         self.invalid_count = 0
         self.duplicate_count = 0
-        self.fallback_count = 0
+
+    @property
+    def total_processed(self) -> int:
+        return self.redis_persisted + self.fallback_count
 
     # ------------------------------------------------------------------
     # Connection
@@ -53,8 +60,9 @@ class MessageStore:
             self._connected = True
             self.degraded = False
         except (redis.ConnectionError, redis.TimeoutError, OSError):
+            # No Redis at startup — not an error, just local mode
             self._connected = False
-            self.degraded = True
+            self.degraded = False
 
     async def disconnect(self) -> None:
         if self._redis:
@@ -95,17 +103,14 @@ class MessageStore:
             return True
 
     async def save_result(self, result: ProcessingResult) -> bool:
-        """Persist a processing result. Returns False if fallback was used.
-
-        Must only be called after a successful try_claim_message for the
-        same message_id.
-        """
+        """Persist a processing result. Returns False if fallback was used."""
         key = f"msg:{result.message_id}"
         value = result.model_dump_json()
 
         try:
             if self._connected and self._redis:
                 await self._redis.set(key, value)
+                self.redis_persisted += 1
                 return True
         except (redis.ConnectionError, redis.TimeoutError, OSError):
             self._mark_degraded()
@@ -160,30 +165,35 @@ class MessageStore:
     # ------------------------------------------------------------------
 
     def health(self) -> dict:
+        status = "healthy"
+        if self.degraded:
+            status = "degraded"
+        elif not self._connected:
+            status = "local"
         return {
-            "redis": "degraded" if self.degraded else "healthy",
-            "processed_messages": self.processed_count,
+            "redis": status,
+            "total_processed": self.total_processed,
+            "redis_persisted": self.redis_persisted,
+            "fallback_writes": self.fallback_count,
             "invalid_messages": self.invalid_count,
             "duplicate_messages": self.duplicate_count,
-            "fallback_writes": self.fallback_count,
         }
 
     # ------------------------------------------------------------------
-    # Force degrade / recover (for demo)
+    # Force degrade / recover / reset (for demo)
     # ------------------------------------------------------------------
 
-    def reset_counters(self) -> None:
-        self.processed_count = 0
+    def reset_all(self) -> None:
+        """Clear all in-memory state and reset counters."""
+        self._messages.clear()
+        self._group_states.clear()
+        self._msg_locks.clear()
+        self.redis_persisted = 0
+        self.fallback_count = 0
         self.invalid_count = 0
         self.duplicate_count = 0
-        self.fallback_count = 0
 
     def force_degraded(self) -> None:
-        """Disconnect Redis and enter degraded mode.
-
-        The underlying Redis connection is dropped. For proper resource
-        cleanup before shutdown, call ``disconnect()`` instead.
-        """
         self._redis = None
         self._connected = False
         self.degraded = True
@@ -197,6 +207,9 @@ class MessageStore:
     # ------------------------------------------------------------------
 
     def _mark_degraded(self) -> None:
-        if not self.degraded:
+        # Only mark degraded if we actually had a Redis connection.
+        # If Redis was never connected (started in local mode), it's
+        # a no-op — local mode is normal, not degraded.
+        if self._connected:
             self.degraded = True
             self._connected = False

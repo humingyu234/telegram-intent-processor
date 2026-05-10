@@ -114,10 +114,11 @@ class BatchResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SystemHealth(BaseModel):
-    redis: str  # "healthy" | "degraded"
-    processed_messages: int = 0
+    redis: str  # "healthy" | "local" | "degraded"
+    total_processed: int = 0
+    redis_persisted: int = 0
+    fallback_writes: int = 0
     invalid_messages: int = 0
     duplicate_messages: int = 0
-    fallback_writes: int = 0
     in_flight_messages: int = 0
     max_in_flight_limit: int = 50
