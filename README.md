@@ -1,5 +1,7 @@
 # Telegram Intent Processor
 
+[![tests](https://github.com/humingyu234/telegram-intent-processor/actions/workflows/test.yml/badge.svg)](https://github.com/humingyu234/telegram-intent-processor/actions/workflows/test.yml)
+
 一个 Telegram 风格的群消息处理器，重点展示真实后端边界：**意图识别、群级状态、并发处理、Redis 持久化、Redis 断连降级、异常消息隔离和实时 Dashboard。**
 
 ---
