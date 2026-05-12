@@ -43,8 +43,8 @@ class MessageProcessor:
         # In-memory group state machines (loaded from store on first access)
         self._state_machines: dict[str, GroupStateMachine] = {}
 
-        # SSE subscriber queues
-        self._subscribers: list[asyncio.Queue] = []
+        # SSE event queue — single shared queue, no subscriber management
+        self._sse_queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
 
     # ------------------------------------------------------------------
     # Public API
@@ -75,19 +75,12 @@ class MessageProcessor:
         self._in_flight = 0
 
     # ------------------------------------------------------------------
-    # SSE subscriber management
+    # SSE
     # ------------------------------------------------------------------
 
-    def subscribe(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=256)
-        self._subscribers.append(q)
-        return q
-
-    def unsubscribe(self, q: asyncio.Queue) -> None:
-        try:
-            self._subscribers.remove(q)
-        except ValueError:
-            pass
+    @property
+    def sse_queue(self) -> asyncio.Queue:
+        return self._sse_queue
 
     # ------------------------------------------------------------------
     # Group state helpers
@@ -175,8 +168,8 @@ class MessageProcessor:
                 }
             )
 
-        # — step 4: push SSE —
-        await self._broadcast(result, snapshot)
+        # — step 4: push SSE (fire-and-forget — must not block the pipeline) —
+        asyncio.create_task(self._broadcast(result, snapshot))
 
         return result
 
@@ -215,13 +208,9 @@ class MessageProcessor:
             "result": result.model_dump(),
             "group_snapshot": snapshot.model_dump(),
             "health": self.store.health(),
-            "in_flight": self._in_flight - 1,  # exclude self, not yet decr'd in process()
+            "in_flight": self._in_flight,
         }
-        dead: list[asyncio.Queue] = []
-        for q in self._subscribers:
-            try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
-                dead.append(q)
-        for q in dead:
-            self.unsubscribe(q)
+        try:
+            await asyncio.wait_for(self._sse_queue.put(event), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass  # SSE consumer is dead or stuck — polling will keep the dashboard alive

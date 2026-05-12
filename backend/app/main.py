@@ -169,18 +169,15 @@ async def sse_events(request: Request) -> StreamingResponse:
     """SSE stream — pushes every processed result to the dashboard."""
 
     async def event_stream():
-        q = processor.subscribe()
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=15)
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-        finally:
-            processor.unsubscribe(q)
+        q = processor.sse_queue
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=15)
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
 
     return StreamingResponse(
         event_stream(),

@@ -121,6 +121,108 @@ const maxStream = 50;
 
 const groups = {}; // group_id -> latest snapshot
 
+// ---- Throttled rendering ----
+let pending = { stream: [], class: [], groups: null, health: null, inflight: null };
+let rafScheduled = false;
+
+function flushPending() {
+  // Health
+  if (pending.health) {
+    const h = pending.health;
+    document.getElementById('h-redis').textContent = h.redis;
+    document.getElementById('h-redis').className = 'health-value ' + redisClass(h.redis);
+    document.getElementById('h-total').textContent = h.total_processed || 0;
+    document.getElementById('h-persisted').textContent = h.redis_persisted || 0;
+    document.getElementById('h-fallback').textContent = h.fallback_writes || 0;
+    document.getElementById('h-invalid').textContent = h.invalid_messages || 0;
+    document.getElementById('h-duplicates').textContent = h.duplicate_messages || 0;
+  }
+  if (pending.inflight !== null) {
+    document.getElementById('h-inflight').textContent = pending.inflight;
+  }
+
+  // Message stream — batch insert
+  if (pending.stream.length) {
+    let html = '';
+    for (const r of pending.stream) {
+      const statusClsMap = { processed: 'green', duplicate: 'yellow', invalid: 'red', fallback: 'orange', failed: 'red' };
+      html += '<div class="msg-row">' +
+        '<span style="color:var(--' + (statusClsMap[r.status] || 'muted') + ')">' + r.status + '</span>' +
+        '<span>' + r.message_id + '</span>' +
+        '<span style="color:var(--accent)">' + r.group_id + '</span>' +
+        '<span>' + r.user_id + '</span>' +
+        '<span title="' + r.text.replace(/"/g, '&quot;') + '" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + r.text + '</span>' +
+        '</div>';
+    }
+    streamEl.insertAdjacentHTML('afterbegin', html);
+    while (streamEl.children.length > maxStream) streamEl.lastChild.remove();
+  }
+
+  // Classification — batch insert
+  if (pending.class.length) {
+    let html = '';
+    for (const r of pending.class) {
+      const tagSpans = r.tags.map(t => {
+        let cls = 'tag';
+        if (t === 'urgent' || t === 'billing_dispute') cls += ' urgent';
+        if (t === 'needs_human' || t === 'complaint_context') cls += ' needs_human';
+        return '<span class="' + cls + '">' + t + '</span>';
+      }).join(' ');
+      html += '<div class="msg-row">' +
+        '<span style="color:var(--purple)">' + r.intent + '</span>' +
+        tagSpans +
+        '<span style="color:var(--muted);font-size:10px;">' + (r.reason || '') + '</span>' +
+        '</div>';
+    }
+    classEl.insertAdjacentHTML('afterbegin', html);
+    while (classEl.children.length > maxStream) classEl.lastChild.remove();
+  }
+
+  // Group state
+  if (pending.groups) {
+    let gHtml = '';
+    for (const [gid, g] of Object.entries(pending.groups)) {
+      const attn = g.needs_human_attention ? ' <span class="attn">NEEDS HUMAN</span>' : '';
+      gHtml += '<div class="group-card">' +
+        '<span class="gid">' + gid + '</span> ' +
+        '<span>' + g.current_state + '</span>' +
+        attn +
+        ' | msgs: ' + g.message_count +
+        ' | ' + formatCounts(g.intent_counts) +
+        ' | last: <span style="color:var(--accent)">' + (g.last_intent || '—') + '</span>' +
+        '</div>';
+    }
+    groupEl.innerHTML = gHtml || '<div style="color:var(--muted)">No groups yet.</div>';
+  }
+
+  pending = { stream: [], class: [], groups: null, health: null, inflight: null };
+  rafScheduled = false;
+}
+
+function scheduleFlush() {
+  if (!rafScheduled) {
+    rafScheduled = true;
+    requestAnimationFrame(flushPending);
+  }
+}
+
+// ---- Init: pull real state so refresh doesn't zero out ----
+fetch('/health').then(r => r.json()).then(h => {
+  pending.health = h;
+  pending.inflight = h.in_flight_messages;
+  scheduleFlush();
+});
+
+// ---- Poll health every 2s — fallback when SSE can't keep up ----
+setInterval(function() {
+  fetch('/health').then(r => r.json()).then(h => {
+    pending.health = h;
+    pending.inflight = h.in_flight_messages;
+    scheduleFlush();
+  });
+}, 2000);
+
+// ---- Helpers ----
 function demo(action) {
   fetch('/demo/' + action, { method: 'POST' })
     .then(r => r.json())
@@ -144,7 +246,7 @@ function redisClass(status) {
   return 'red';
 }
 
-// SSE
+// ---- SSE ----
 const evtSource = new EventSource('/events');
 evtSource.onmessage = function(e) {
   const event = JSON.parse(e.data);
@@ -152,61 +254,20 @@ evtSource.onmessage = function(e) {
 
   const r = event.result;
   const snap = event.group_snapshot;
-  const h = event.health;
 
-  // Health
-  document.getElementById('h-redis').textContent = h.redis;
-  document.getElementById('h-redis').className = 'health-value ' + redisClass(h.redis);
-  document.getElementById('h-total').textContent = h.total_processed || 0;
-  document.getElementById('h-persisted').textContent = h.redis_persisted || 0;
-  document.getElementById('h-fallback').textContent = h.fallback_writes || 0;
-  document.getElementById('h-invalid').textContent = h.invalid_messages || 0;
-  document.getElementById('h-duplicates').textContent = h.duplicate_messages || 0;
-  document.getElementById('h-inflight').textContent = event.in_flight;
-
-  // Message stream
-  const statusCls = { processed: 'green', duplicate: 'yellow', invalid: 'red', fallback: 'orange', failed: 'red' };
-  const tagSpans = r.tags.map(t => {
-    let cls = 'tag';
-    if (t === 'urgent' || t === 'billing_dispute') cls += ' urgent';
-    if (t === 'needs_human' || t === 'complaint_context') cls += ' needs_human';
-    return '<span class="' + cls + '">' + t + '</span>';
-  }).join(' ');
-
-  const row = '<div class="msg-row">' +
-    '<span style="color:var(--' + (statusCls[r.status] || 'muted') + ')">' + r.status + '</span>' +
-    '<span>' + r.message_id + '</span>' +
-    '<span style="color:var(--accent)">' + r.group_id + '</span>' +
-    '<span>' + r.user_id + '</span>' +
-    '<span title="' + r.text.replace(/"/g, '&quot;') + '" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + r.text + '</span>' +
-    '</div>';
-  streamEl.insertAdjacentHTML('afterbegin', row);
-  while (streamEl.children.length > maxStream) streamEl.lastChild.remove();
-
-  // Classification
-  const cRow = '<div class="msg-row">' +
-    '<span style="color:var(--purple)">' + r.intent + '</span>' +
-    tagSpans +
-    '<span style="color:var(--muted);font-size:10px;">' + (r.reason || '') + '</span>' +
-    '</div>';
-  classEl.insertAdjacentHTML('afterbegin', cRow);
-  while (classEl.children.length > maxStream) classEl.lastChild.remove();
-
-  // Group state
+  // Update shared group map
   groups[snap.group_id] = snap;
-  let gHtml = '';
-  for (const [gid, g] of Object.entries(groups)) {
-    const attn = g.needs_human_attention ? ' <span class="attn">NEEDS HUMAN</span>' : '';
-    gHtml += '<div class="group-card">' +
-      '<span class="gid">' + gid + '</span> ' +
-      '<span>' + g.current_state + '</span>' +
-      attn +
-      ' | msgs: ' + g.message_count +
-      ' | ' + formatCounts(g.intent_counts) +
-      ' | last: <span style="color:var(--accent)">' + (g.last_intent || '—') + '</span>' +
-      '</div>';
-  }
-  groupEl.innerHTML = gHtml || '<div style="color:var(--muted)">No groups yet.</div>';
+
+  // Buffer into pending batch — cap at maxStream so flush is always cheap
+  pending.health = event.health;
+  pending.inflight = event.in_flight;
+  pending.stream.push(r);
+  if (pending.stream.length > maxStream) pending.stream.shift();
+  pending.class.push(r);
+  if (pending.class.length > maxStream) pending.class.shift();
+  pending.groups = Object.assign({}, groups);
+
+  scheduleFlush();
 };
 
 evtSource.onerror = function() { console.log('SSE disconnected, reconnecting...'); };
