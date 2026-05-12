@@ -4,7 +4,7 @@
 
 一个 Telegram 风格的群消息处理器，重点展示真实后端边界：**意图识别、群级状态、并发处理、Redis 持久化、Redis 断连降级、异常消息隔离和实时 Dashboard。**
 
-> **实测验证**：处理管道连续承受 **14 万+ 条消息高并发输入**，零无效消息、零降级写入、零连接泄漏。Dashboard 上 `total_processed` 即为此数字实时累计。
+> 经实测验证，处理管道连续承受 **14 万+ 条消息** 高并发输入 —— **零无效消息、零降级写入、零连接泄漏**。Dashboard 上实时累计的 `total_processed` 即此数字，可当面复现。
 
 ---
 
@@ -40,7 +40,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 打开 **http://localhost:8000/dashboard** 进入实时面板。
 
-------
+---
 
 ## Dashboard 功能
 
@@ -63,6 +63,34 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | Simulate Redis Down | 临时断开 Redis，验证降级不丢数据 |
 | Recover Redis | 尝试重连 Redis，恢复后自动切回 |
 | Send Malformed Message | 发送坏消息，验证安检不崩溃 |
+
+---
+
+## 为什么用模拟流量而不是真实 Telegram Bot API
+
+**不是模拟太简单，是模拟比真实更难。**
+
+真实 Telegram Bot API 每秒最多推送约 30 条消息。本项目 Load Demo 以 **1500 条/秒** 的速率向管道灌入消息 —— 是真实场景吞吐上限的 **50 倍**。如果管道能扛住 1500 条/秒不崩，30 条/秒的真实场景下它几乎处于空闲状态。
+
+| 维度 | 本项目模拟负载 | 真实 Telegram Bot API |
+|------|--------------|----------------------|
+| 消息到达速率 | 1500 条/秒 | ~30 条/秒 |
+| 管道饱和度 | 100%（semaphore 常满） | <2% |
+| 并发写入压力 | 50 群同时争抢锁 | 群稀疏到达，几乎无锁争用 |
+| 可复现性 | 一键 demo，完全可控 | 依赖外部 API，不可控 |
+| 评审者体验 | `docker compose up` 即开即用 | 需注册 Bot、配 Token、设 Webhook |
+
+**真实 Telegram 到底多什么？** 真实场景的挑战在网络层面，不在管道内部：Webhook 超时重试导致消息重复投递、连接间歇断开、部分故障时消息乱序到达。但这些问题已有对应机制：
+
+| 真实场景问题 | 本项目的对应机制 |
+|-------------|----------------|
+| 超时导致 Telegram 重复推送 | `message_id` 幂等去重（Redis SET NX，无 TOCTOU 窗口） |
+| 下游存储不可用 | 三段式降级：healthy → degraded → local |
+| 消息乱序到达 | per-group `asyncio.Lock` 保证同群串行 |
+
+**管道核心逻辑（校验 → 去重 → 分类 → 状态更新 → 持久化 → 推送）跟消息来源无关。** 替换输入源（Telegram Webhook / Kafka / 文件读取），管道不需要任何改动。
+
+更重要的是：真实 Telegram 永远无法产生 1500 条/秒的并发涌入，也无法点一个按钮就模拟 Redis 断连 —— 这些刻意设计的破坏性场景只有模拟能做，而它们恰恰是证明系统边界最有效的方式。
 
 ---
 
@@ -142,7 +170,7 @@ docker compose exec app pytest tests/ -v
 
 ## 设计说明
 
-**意图分类。** 关键词 + 正则规则，不接 LLM。投诉优先级最高，优先级链条：complaint > help > pricing > product > other。支持群上下文感知——COMPLAINT_ESCALATED 群中的询价会额外打 `billing_dispute` 标签。
+**意图分类。** 关键词 + 正则规则，不接 LLM。投诉优先级最高，优先级链条：complaint > help > pricing > product > other。支持群上下文感知 —— COMPLAINT_ESCALATED 群中的询价会额外打 `billing_dispute` 标签。
 
 **群状态机。** 每个群维护一个状态机：IDLE → PRODUCT_DISCUSSION → PRICING_DISCUSSION → SUPPORT_NEEDED → COMPLAINT_ESCALATED。投诉直接覆盖任何状态，并设置 `needs_human_attention`，不自动消除。
 
@@ -160,43 +188,13 @@ docker compose exec app pytest tests/ -v
 
 - 不接 LLM —— 关键词规则可预测、零延迟、零外部依赖
 - 不做 React 前端 —— 单文件 HTML + SSE，零构建
-- 不接真实 Telegram Bot Token —— HTTP API 模拟消息流
+- 不接真实 Telegram Bot Token —— HTTP API 模拟消息流（理由见上）
 - 不做登录系统 —— 演示系统，不需要 auth
 - 不做大规模压测平台 —— 内置 load demo 已够展示并发能力
 
 **做了且有意这么做的：**
 
-- 分类器接受 `group_context` 参数，支持上下文感知，但不依赖上下文做意图反转——关键词仍然决定意图，上下文只影响标签
-- `OTHER` 意图不改变群状态——"好的谢谢" 不应该冲掉之前的讨论状态
+- 分类器接受 `group_context` 参数，支持上下文感知，但不依赖上下文做意图反转 —— 关键词仍然决定意图，上下文只影响标签
+- `OTHER` 意图不改变群状态 —— "好的谢谢" 不应该冲掉之前的讨论状态
 - 每个处理结果都有一个明确的状态枚举，不存在隐式结果
-- `needs_human_attention` 是**粘性的**——一旦某群出现投诉并设为 True，不会自动清除。这是业务设计：被投诉过的群值得持续关注，即使之后消息正常
-
----
-
-### 为什么用模拟流量而不是真实 Telegram Bot API
-
-**不是模拟太简单，是模拟比真实更难。**
-
-真实 Telegram Bot API 每秒最多推送约 30 条消息。本项目 Load Demo 以 **1500 条/秒** 的速率向管道灌入消息——是真实场景吞吐上限的 **50 倍**。如果管道能扛住 1500 条/秒不崩，30 条/秒的真实场景下它几乎处于空闲状态。
-
-| 维度 | 本项目模拟负载 | 真实 Telegram Bot API |
-|------|--------------|----------------------|
-| 消息到达速率 | 1500 条/秒 | ~30 条/秒 |
-| 管道饱和度 | 100%（semaphore 常满） | <2% |
-| 并发写入压力 | 50 群同时争抢锁 | 群稀疏到达，几乎无锁争用 |
-| 可复现性 | 一键 demo，完全可控 | 依赖外部 API，不可控 |
-| 评审者体验 | `docker compose up` 即开即用 | 需注册 Bot、配 Token、设 Webhook |
-
-**那真实 Telegram 到底多什么？** 真实场景的"脏"不在吞吐量——1500 条/秒的压力远大于 30 条/秒。真实场景的挑战在网络层面：Webhook 超时重试导致消息重复投递、连接间歇断开、响应必须在数秒内返回 200 否则重试、部分网络故障时消息乱序到达。
-
-但这些问题的解法已经内置在管道里了：
-
-| 真实场景问题 | 本项目的对应机制 |
-|-------------|----------------|
-| 超时导致 Telegram 重复推送 | `message_id` 幂等去重（Redis SET NX） |
-| 下游存储不可用 | 三段式降级：healthy → degraded → local |
-| 消息乱序到达 | per-group `asyncio.Lock` 保证同群串行 |
-
-**管道的核心逻辑（校验 → 去重 → 分类 → 状态更新 → 持久化 → 推送）跟消息来源无关。** 替换输入源（Telegram Webhook / Kafka / 文件读取），管道不需要任何改动。
-
-更重要的是：真实 Telegram 永远无法产生 1500 条/秒的并发涌入，也无法点一个按钮就模拟 Redis 断连——这些刻意设计的破坏性场景只有模拟能做，它们恰恰是证明系统边界最有效的方式。
+- `needs_human_attention` 是**粘性的** —— 一旦某群出现投诉并设为 True，不会自动清除。这是业务设计：被投诉过的群值得持续关注，即使之后消息正常
