@@ -3,6 +3,8 @@
 [![tests](https://github.com/humingyu234/telegram-intent-processor/actions/workflows/test.yml/badge.svg)](https://github.com/humingyu234/telegram-intent-processor/actions/workflows/test.yml)
 
 一个 Telegram 风格的群消息处理器，重点展示真实后端边界：**意图识别、群级状态、并发处理、Redis 持久化、Redis 断连降级、异常消息隔离和实时 Dashboard。** 经实测验证，处理管道连续承受 **14 万+ 条消息** 高并发输入 —— **零无效消息、零降级写入、零连接泄漏**。Dashboard 上实时累计的 `total_processed` 即此数字，可当面复现。
+<img width="1910" height="974" alt="6894a82bf8415365a72de2abd3093fe1" src="https://github.com/user-attachments/assets/77c05797-96b9-4e22-891b-5ef1190b32d4" />
+
 
 ---
 
